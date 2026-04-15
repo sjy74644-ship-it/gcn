@@ -23,6 +23,7 @@ class DatasetSpec:
     num_joints: int = 17
     sigma: float = 2.5
     heatmap_size: int = 64
+    input_size: int = 640
 
 
 class PairedPosePngDataset(Dataset):
@@ -51,8 +52,8 @@ class PairedPosePngDataset(Dataset):
             )
 
         self.kpt_columns = [c for c in self.df.columns if c != "id"]
-        normalize = T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-        default_tf = T.Compose([T.Resize((256, 256)), T.ToTensor(), normalize])
+        # YOLOv8-style input: resize to imgsz and normalize to [0,1] via ToTensor
+        default_tf = T.Compose([T.Resize((spec.input_size, spec.input_size)), T.ToTensor()])
 
         self.transform_visual = transform_visual or default_tf
         self.transform_radar = transform_radar or default_tf
@@ -69,7 +70,7 @@ class PairedPosePngDataset(Dataset):
         return image.convert("RGB")
 
     def _gaussian_heatmaps(self, keypoints_xy: torch.Tensor) -> torch.Tensor:
-        """Generate [K,H,W] gaussian heatmaps from [K,2] coords in 256x256 space."""
+        """Generate [K,H,W] gaussian heatmaps from [K,2] coords in input_size space."""
         k = self.spec.num_joints
         h = self.spec.heatmap_size
         w = self.spec.heatmap_size
@@ -78,10 +79,10 @@ class PairedPosePngDataset(Dataset):
         ys = torch.arange(h, dtype=torch.float32).view(1, h, 1)
         xs = torch.arange(w, dtype=torch.float32).view(1, 1, w)
 
-        # coordinates are provided in 256x256 image space, map to heatmap space
+        # coordinates are provided in input_size space, map to heatmap space
         kp = keypoints_xy.clone()
-        kp[:, 0] = kp[:, 0] * (w / 256.0)
-        kp[:, 1] = kp[:, 1] * (h / 256.0)
+        kp[:, 0] = kp[:, 0] * (w / float(self.spec.input_size))
+        kp[:, 1] = kp[:, 1] * (h / float(self.spec.input_size))
 
         mu_x = kp[:, 0].view(k, 1, 1)
         mu_y = kp[:, 1].view(k, 1, 1)

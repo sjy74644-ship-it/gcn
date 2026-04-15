@@ -12,12 +12,16 @@ from distill_framework.trainer import DistillationConfig, DistillationTrainer
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Visual-to-radar SRRL pose distillation")
+    parser = argparse.ArgumentParser(description="Visual-to-radar SRRL pose distillation (YOLOv8 backbone)")
     parser.add_argument("--data_root", type=str, required=True)
     parser.add_argument("--labels_csv", type=str, required=True)
     parser.add_argument("--num_joints", type=int, default=17)
     parser.add_argument("--sigma", type=float, default=2.5)
     parser.add_argument("--heatmap_size", type=int, default=64)
+    parser.add_argument("--input_size", type=int, default=640, help="YOLOv8 imgsz")
+
+    parser.add_argument("--yolo_model", type=str, default="yolov8n.yaml", help="e.g. yolov8n.yaml/yolov8s.yaml")
+    parser.add_argument("--feat_channels", type=int, default=256, help="YOLOv8 neck deep feature channels")
 
     parser.add_argument("--batch_size", type=int, default=16)
     parser.add_argument("--num_epochs", type=int, default=20)
@@ -49,6 +53,7 @@ def main() -> None:
         num_joints=args.num_joints,
         sigma=args.sigma,
         heatmap_size=args.heatmap_size,
+        input_size=args.input_size,
     )
     train_ds = PairedPosePngDataset(ds_spec)
 
@@ -61,9 +66,9 @@ def main() -> None:
         drop_last=False,
     )
 
-    teacher = PoseTeacher(num_joints=args.num_joints, pretrained=False)
-    student = PoseStudent(num_joints=args.num_joints, pretrained=False)
-    projector = SRRLProjector(channels=512)
+    teacher = PoseTeacher(num_joints=args.num_joints, yolo_model=args.yolo_model, in_channels=args.feat_channels)
+    student = PoseStudent(num_joints=args.num_joints, yolo_model=args.yolo_model, in_channels=args.feat_channels)
+    projector = SRRLProjector(channels=args.feat_channels)
 
     config = DistillationConfig(
         lr=args.lr,

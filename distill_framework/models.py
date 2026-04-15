@@ -1,46 +1,53 @@
 from __future__ import annotations
 
-from typing import Dict, Tuple
+from typing import Dict
 
 import torch
 import torch.nn as nn
-from torchvision.models import resnet18
+from ultralytics import YOLO
 
 
-class ResNetEncoder(nn.Module):
-    def __init__(self, pretrained: bool = False) -> None:
+class YOLOv8Backbone(nn.Module):
+    """Use YOLOv8 backbone graph execution to extract deep feature map."""
+
+    def __init__(self, model_name: str = "yolov8n.yaml") -> None:
         super().__init__()
-        m = resnet18(weights=None if not pretrained else "IMAGENET1K_V1")
-        self.stage0 = nn.Sequential(m.conv1, m.bn1, m.relu, m.maxpool)  # /4
-        self.stage1 = m.layer1  # /4
-        self.stage2 = m.layer2  # /8
-        self.stage3 = m.layer3  # /16
-        self.stage4 = m.layer4  # /32
+        yolo = YOLO(model_name)
+        # underlying DetectionModel
+        self.model = yolo.model
+        self.layers = self.model.model
+        self.save = self.model.save
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.stage0(x)
-        x = self.stage1(x)
-        x = self.stage2(x)
-        x = self.stage3(x)
-        x = self.stage4(x)
+        cache = []
+        for m in self.layers:
+            if m.f != -1:
+                if isinstance(m.f, int):
+                    x = cache[m.f]
+                else:
+                    x = [x if j == -1 else cache[j] for j in m.f]
+            x = m(x)
+            cache.append(x if m.i in self.save else None)
+
+        # DetectionModel最后输出一般是list/tuple，取最高层特征
+        if isinstance(x, (list, tuple)):
+            x = x[-1]
         return x
 
 
 class HeatmapHead(nn.Module):
-    """Decode encoder feature map to K-joint heatmaps."""
-
     def __init__(self, in_channels: int, num_joints: int) -> None:
         super().__init__()
         self.decode = nn.Sequential(
             nn.ConvTranspose2d(in_channels, 256, kernel_size=4, stride=2, padding=1),
             nn.BatchNorm2d(256),
-            nn.ReLU(inplace=True),
+            nn.SiLU(inplace=True),
             nn.ConvTranspose2d(256, 128, kernel_size=4, stride=2, padding=1),
             nn.BatchNorm2d(128),
-            nn.ReLU(inplace=True),
+            nn.SiLU(inplace=True),
             nn.ConvTranspose2d(128, 64, kernel_size=4, stride=2, padding=1),
             nn.BatchNorm2d(64),
-            nn.ReLU(inplace=True),
+            nn.SiLU(inplace=True),
             nn.Conv2d(64, num_joints, kernel_size=1),
         )
 
@@ -49,14 +56,12 @@ class HeatmapHead(nn.Module):
 
 
 class SRRLProjector(nn.Module):
-    """G(Fr): map radar feature to visual feature space."""
-
-    def __init__(self, channels: int = 512) -> None:
+    def __init__(self, channels: int) -> None:
         super().__init__()
         self.net = nn.Sequential(
             nn.Conv2d(channels, channels, kernel_size=1, bias=False),
             nn.BatchNorm2d(channels),
-            nn.ReLU(inplace=True),
+            nn.SiLU(inplace=True),
             nn.Conv2d(channels, channels, kernel_size=1, bias=False),
         )
 
@@ -65,12 +70,12 @@ class SRRLProjector(nn.Module):
 
 
 class PoseHeatmapNet(nn.Module):
-    """Common network producing feature map + heatmap."""
+    """YOLOv8-backbone pose heatmap net."""
 
-    def __init__(self, num_joints: int, pretrained: bool = False) -> None:
+    def __init__(self, num_joints: int, yolo_model: str = "yolov8n.yaml", in_channels: int = 256) -> None:
         super().__init__()
-        self.encoder = ResNetEncoder(pretrained=pretrained)
-        self.head = HeatmapHead(in_channels=512, num_joints=num_joints)
+        self.encoder = YOLOv8Backbone(model_name=yolo_model)
+        self.head = HeatmapHead(in_channels=in_channels, num_joints=num_joints)
 
     def forward(self, x: torch.Tensor) -> Dict[str, torch.Tensor]:
         feat = self.encoder(x)
@@ -82,15 +87,14 @@ class PoseHeatmapNet(nn.Module):
 
 
 class PoseTeacher(PoseHeatmapNet):
-    """Teacher takes visual PNG tensors."""
+    pass
 
 
 class PoseStudent(PoseHeatmapNet):
-    """Student takes radar PNG tensors."""
+    pass
 
 
 def soft_argmax_2d(heatmap: torch.Tensor) -> torch.Tensor:
-    """Convert heatmaps [B,K,H,W] to coordinates [B,K,2] in pixel space."""
     b, k, h, w = heatmap.shape
     prob = torch.softmax(heatmap.flatten(2), dim=-1).view(b, k, h, w)
 

@@ -21,6 +21,9 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument("--num_joints", type=int, default=17)
     parser.add_argument("--heatmap_size", type=int, default=64)
+    parser.add_argument("--input_size", type=int, default=640)
+    parser.add_argument("--yolo_model", type=str, default="yolov8n.yaml")
+    parser.add_argument("--feat_channels", type=int, default=256)
     parser.add_argument("--batch_size", type=int, default=16)
     parser.add_argument("--num_workers", type=int, default=4)
     return parser.parse_args()
@@ -37,11 +40,17 @@ def main() -> None:
         radar_dir=Path(args.radar_dir),
         num_joints=args.num_joints,
         heatmap_size=args.heatmap_size,
+        input_size=args.input_size,
     )
     ds = PairedPosePngDataset(spec)
     dl = DataLoader(ds, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers)
 
-    student = PoseStudent(num_joints=args.num_joints, pretrained=False).to(device)
+    student = PoseStudent(
+        num_joints=args.num_joints,
+        yolo_model=args.yolo_model,
+        in_channels=args.feat_channels,
+    ).to(device)
+
     ckpt = torch.load(args.checkpoint, map_location=device)
     if "student" in ckpt:
         student.load_state_dict(ckpt["student"])
@@ -56,7 +65,7 @@ def main() -> None:
             radar = batch["radar"].to(device)
             out = student(radar)
             coords = soft_argmax_2d(out["heatmap"])  # [B,K,2], heatmap-space
-            coords = coords * (256.0 / args.heatmap_size)  # back to image-space
+            coords = coords * (float(args.input_size) / float(args.heatmap_size))
 
             ids = batch["id"]
             for i, sid in enumerate(ids):
