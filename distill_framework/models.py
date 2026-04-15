@@ -18,22 +18,44 @@ class YOLOv8Backbone(nn.Module):
         self.layers = self.model.model
         self.save = self.model.save
 
+    @staticmethod
+    def _pick_tensor(obj):
+        if isinstance(obj, torch.Tensor):
+            return obj
+        if isinstance(obj, (list, tuple)):
+            cands = [YOLOv8Backbone._pick_tensor(o) for o in obj]
+            cands = [c for c in cands if isinstance(c, torch.Tensor)]
+            if not cands:
+                return None
+            # prefer deeper/higher-channel feature
+            return max(cands, key=lambda t: (t.ndim, t.shape[1] if t.ndim >= 2 else 0, t.numel()))
+        return None
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         cache = []
         for m in self.layers:
             if m.f != -1:
                 if isinstance(m.f, int):
-                    x = cache[m.f]
+                    x_in = cache[m.f]
                 else:
-                    x = [x if j == -1 else cache[j] for j in m.f]
-            x = m(x)
+                    x_in = [x if j == -1 else cache[j] for j in m.f]
+            else:
+                x_in = x
+
+            # stop before detection/pose heads, return their input feature(s)
+            if m.__class__.__name__ in {"Detect", "Pose", "Segment", "OBB", "WorldDetect", "v10Detect"}:
+                feat = self._pick_tensor(x_in)
+                if isinstance(feat, torch.Tensor):
+                    return feat
+                raise RuntimeError(f"Cannot extract tensor feature before head: {m.__class__.__name__}")
+
+            x = m(x_in)
             cache.append(x if m.i in self.save else None)
 
-        if isinstance(x, (list, tuple)):
-            x = x[-1]
-        if not isinstance(x, torch.Tensor):
+        feat = self._pick_tensor(x)
+        if not isinstance(feat, torch.Tensor):
             raise RuntimeError("YOLOv8 backbone output is not a tensor.")
-        return x
+        return feat
 
 
 class HeatmapHead(nn.Module):
@@ -82,6 +104,7 @@ class PoseHeatmapNet(nn.Module):
     ) -> None:
         super().__init__()
         self.encoder = YOLOv8Backbone(model_name=yolo_model)
+        self.num_joints = num_joints
         self.head = HeatmapHead(in_channels=in_channels, num_joints=num_joints)
         self.out_heatmap_size = int(out_heatmap_size)
 
@@ -96,12 +119,20 @@ class PoseHeatmapNet(nn.Module):
             align_corners=False,
         )
 
+    def _ensure_head_channels(self, feat: torch.Tensor) -> None:
+        head_in = self.head.decode[0].in_channels
+        if feat.shape[1] != head_in:
+            print(f"[Model] Adjust HeatmapHead in_channels {head_in} -> {feat.shape[1]}")
+            self.head = HeatmapHead(in_channels=feat.shape[1], num_joints=self.num_joints).to(feat.device)
+
     def forward(self, x: torch.Tensor) -> Dict[str, torch.Tensor]:
         feat = self.encoder(x)
+        self._ensure_head_channels(feat)
         heatmap = self._align_heatmap(self.head(feat))
         return {"feat": feat, "heatmap": heatmap}
 
     def decode_with_head(self, feat: torch.Tensor) -> torch.Tensor:
+        self._ensure_head_channels(feat)
         return self._align_heatmap(self.head(feat))
 
 
