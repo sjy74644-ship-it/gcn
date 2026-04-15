@@ -1,13 +1,15 @@
-"""Visual-to-radar pose distillation framework."""
+"""Visual-to-radar SRRL pose distillation framework."""
 
-from .dataset import PairedPosePngDataset
-from .models import PoseTeacher, PoseStudent
-from .trainer import DistillationTrainer, DistillationConfig
+from .dataset import DatasetSpec, PairedPosePngDataset
+from .models import PoseTeacher, PoseStudent, SRRLProjector
+from .trainer import DistillationConfig, DistillationTrainer
 
 __all__ = [
+    "DatasetSpec",
     "PairedPosePngDataset",
     "PoseTeacher",
     "PoseStudent",
-    "DistillationTrainer",
+    "SRRLProjector",
     "DistillationConfig",
+    "DistillationTrainer",
 ]

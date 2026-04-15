@@ -7,24 +7,31 @@ import torch
 from torch.utils.data import DataLoader
 
 from distill_framework.dataset import DatasetSpec, PairedPosePngDataset
-from distill_framework.models import PoseStudent, PoseTeacher
+from distill_framework.models import PoseStudent, PoseTeacher, SRRLProjector
 from distill_framework.trainer import DistillationConfig, DistillationTrainer
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Visual-to-radar pose distillation")
+    parser = argparse.ArgumentParser(description="Visual-to-radar SRRL pose distillation")
     parser.add_argument("--data_root", type=str, required=True)
     parser.add_argument("--labels_csv", type=str, required=True)
-    parser.add_argument("--pose_dim", type=int, default=6)
+    parser.add_argument("--num_joints", type=int, default=17)
+    parser.add_argument("--sigma", type=float, default=2.5)
+    parser.add_argument("--heatmap_size", type=int, default=64)
 
     parser.add_argument("--batch_size", type=int, default=16)
     parser.add_argument("--num_epochs", type=int, default=20)
     parser.add_argument("--num_workers", type=int, default=4)
     parser.add_argument("--lr", type=float, default=1e-4)
 
-    parser.add_argument("--alpha_pose", type=float, default=1.0)
-    parser.add_argument("--alpha_kd_out", type=float, default=1.0)
-    parser.add_argument("--alpha_kd_feat", type=float, default=0.5)
+    parser.add_argument("--w_sup", type=float, default=1.0)
+    parser.add_argument("--w_repr", type=float, default=0.5)
+    parser.add_argument("--w_head", type=float, default=1.0)
+    parser.add_argument("--w_rel", type=float, default=0.2)
+    parser.add_argument("--w_temp", type=float, default=0.1)
+
+    parser.add_argument("--use_pseudo_sup", action="store_true", default=False)
+    parser.add_argument("--simple_repr", action="store_true", default=False)
 
     parser.add_argument("--freeze_teacher", action="store_true", default=True)
     parser.add_argument("--train_teacher", action="store_false", dest="freeze_teacher")
@@ -39,7 +46,9 @@ def main() -> None:
     ds_spec = DatasetSpec(
         data_root=Path(args.data_root),
         labels_csv=Path(args.labels_csv),
-        pose_dim=args.pose_dim,
+        num_joints=args.num_joints,
+        sigma=args.sigma,
+        heatmap_size=args.heatmap_size,
     )
     train_ds = PairedPosePngDataset(ds_spec)
 
@@ -52,8 +61,9 @@ def main() -> None:
         drop_last=False,
     )
 
-    teacher = PoseTeacher(pose_dim=args.pose_dim, pretrained=False)
-    student = PoseStudent(pose_dim=args.pose_dim, pretrained=False)
+    teacher = PoseTeacher(num_joints=args.num_joints, pretrained=False)
+    student = PoseStudent(num_joints=args.num_joints, pretrained=False)
+    projector = SRRLProjector(channels=512)
 
     config = DistillationConfig(
         lr=args.lr,
@@ -61,15 +71,20 @@ def main() -> None:
         num_epochs=args.num_epochs,
         num_workers=args.num_workers,
         freeze_teacher=args.freeze_teacher,
-        alpha_pose=args.alpha_pose,
-        alpha_kd_out=args.alpha_kd_out,
-        alpha_kd_feat=args.alpha_kd_feat,
+        w_sup=args.w_sup,
+        w_repr=args.w_repr,
+        w_head=args.w_head,
+        w_rel=args.w_rel,
+        w_temp=args.w_temp,
+        use_stat_repr=not args.simple_repr,
+        use_pseudo_sup=args.use_pseudo_sup,
         save_dir=args.save_dir,
     )
 
     trainer = DistillationTrainer(
         teacher=teacher,
         student=student,
+        projector=projector,
         config=config,
         device=device,
     )

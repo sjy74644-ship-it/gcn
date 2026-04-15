@@ -18,15 +18,17 @@ class DatasetSpec:
     visual_subdir: str = "visual"
     radar_subdir: str = "radar"
     image_ext: str = ".png"
-    pose_dim: int = 6
+    num_joints: int = 17
+    sigma: float = 2.5
+    heatmap_size: int = 64
 
 
 class PairedPosePngDataset(Dataset):
-    """Load paired visual/radar PNG samples and pose labels.
+    """Load visual/radar png pair + generate GT heatmap from keypoint CSV.
 
-    Expected CSV columns:
-      - id
-      - pose columns (e.g., tx,ty,tz,roll,pitch,yaw) with count == pose_dim
+    CSV format:
+      id, x1, y1, x2, y2, ... xK, yK
+    where K == num_joints
     """
 
     def __init__(
@@ -40,15 +42,15 @@ class PairedPosePngDataset(Dataset):
         if "id" not in self.df.columns:
             raise ValueError("labels_csv must contain an 'id' column")
 
-        pose_columns = [c for c in self.df.columns if c != "id"]
-        if len(pose_columns) != spec.pose_dim:
+        expected_cols = 1 + spec.num_joints * 2
+        if len(self.df.columns) != expected_cols:
             raise ValueError(
-                f"pose_dim={spec.pose_dim}, but found {len(pose_columns)} pose columns: {pose_columns}"
+                f"expected {expected_cols} columns (id + 2*num_joints), got {len(self.df.columns)}"
             )
-        self.pose_columns = pose_columns
 
+        self.kpt_columns = [c for c in self.df.columns if c != "id"]
         normalize = T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-        default_tf = T.Compose([T.Resize((224, 224)), T.ToTensor(), normalize])
+        default_tf = T.Compose([T.Resize((256, 256)), T.ToTensor(), normalize])
 
         self.transform_visual = transform_visual or default_tf
         self.transform_radar = transform_radar or default_tf
@@ -59,10 +61,31 @@ class PairedPosePngDataset(Dataset):
     def __len__(self) -> int:
         return len(self.df)
 
-    def _load_png_rgb(self, path: Path) -> Image.Image:
+    @staticmethod
+    def _load_png_rgb(path: Path) -> Image.Image:
         image = Image.open(path)
-        # radar PNG can be single-channel; convert both to RGB for shared backbones
         return image.convert("RGB")
+
+    def _gaussian_heatmaps(self, keypoints_xy: torch.Tensor) -> torch.Tensor:
+        """Generate [K,H,W] gaussian heatmaps from [K,2] coords in 256x256 space."""
+        k = self.spec.num_joints
+        h = self.spec.heatmap_size
+        w = self.spec.heatmap_size
+        sigma2 = self.spec.sigma * self.spec.sigma
+
+        ys = torch.arange(h, dtype=torch.float32).view(1, h, 1)
+        xs = torch.arange(w, dtype=torch.float32).view(1, 1, w)
+
+        # coordinates are provided in 256x256 image space, map to heatmap space
+        kp = keypoints_xy.clone()
+        kp[:, 0] = kp[:, 0] * (w / 256.0)
+        kp[:, 1] = kp[:, 1] * (h / 256.0)
+
+        mu_x = kp[:, 0].view(k, 1, 1)
+        mu_y = kp[:, 1].view(k, 1, 1)
+
+        heatmaps = torch.exp(-((xs - mu_x) ** 2 + (ys - mu_y) ** 2) / (2.0 * sigma2))
+        return heatmaps
 
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
         row = self.df.iloc[idx]
@@ -82,11 +105,14 @@ class PairedPosePngDataset(Dataset):
         visual_tensor = self.transform_visual(visual_img)
         radar_tensor = self.transform_radar(radar_img)
 
-        pose = torch.tensor(row[self.pose_columns].astype(float).to_numpy(), dtype=torch.float32)
+        kpt = torch.tensor(row[self.kpt_columns].astype(float).to_numpy(), dtype=torch.float32)
+        keypoints_xy = kpt.view(self.spec.num_joints, 2)
+        gt_heatmap = self._gaussian_heatmaps(keypoints_xy)
 
         return {
             "id": sample_id,
             "visual": visual_tensor,
             "radar": radar_tensor,
-            "pose": pose,
+            "keypoints": keypoints_xy,
+            "heatmap_gt": gt_heatmap,
         }
