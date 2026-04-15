@@ -123,3 +123,34 @@ def soft_argmax_2d(heatmap: torch.Tensor) -> torch.Tensor:
     exp_x = (prob.sum(dim=2) * xs.unsqueeze(0).unsqueeze(0)).sum(dim=-1)
     exp_y = (prob.sum(dim=3) * ys.unsqueeze(0).unsqueeze(0)).sum(dim=-1)
     return torch.stack([exp_x, exp_y], dim=-1)
+
+
+def load_yolov8_pose_backbone_weights(encoder: YOLOv8Backbone, yolo_pose_ckpt: str) -> dict:
+    """Load as many matching weights as possible from yolov8 pose checkpoint into encoder.model."""
+    src_model = YOLO(yolo_pose_ckpt).model
+    src_sd = src_model.state_dict()
+    tgt_sd = encoder.model.state_dict()
+
+    new_sd = tgt_sd.copy()
+    loaded = []
+    skipped = []
+
+    for k, v in tgt_sd.items():
+        if k in src_sd and src_sd[k].shape == v.shape:
+            new_sd[k] = src_sd[k]
+            loaded.append(k)
+        else:
+            reason = "missing" if k not in src_sd else f"shape_mismatch src={tuple(src_sd[k].shape)} tgt={tuple(v.shape)}"
+            skipped.append((k, reason))
+
+    encoder.model.load_state_dict(new_sd, strict=False)
+
+    print(f"[TeacherInit] YOLO ckpt: {yolo_pose_ckpt}")
+    print(f"[TeacherInit] backbone matched+loaded: {len(loaded)}")
+    print(f"[TeacherInit] backbone skipped: {len(skipped)}")
+    if skipped:
+        print("[TeacherInit] first skipped keys:")
+        for k, r in skipped[:20]:
+            print(f"  - {k}: {r}")
+
+    return {"loaded": loaded, "skipped": skipped}
