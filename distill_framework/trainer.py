@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict
+from typing import Dict, Optional
 
 import torch
 from torch.utils.data import DataLoader
@@ -17,13 +17,17 @@ class DistillationConfig:
     batch_size: int = 16
     num_epochs: int = 20
     num_workers: int = 4
-    freeze_teacher: bool = True
+
+    train_teacher: bool = False
+    teacher_backbone_ckpt: Optional[str] = None
+    teacher_head_ckpt: Optional[str] = None
+    strict_teacher_load: bool = True
+    allow_random_teacher: bool = False
 
     w_sup: float = 1.0
     w_repr: float = 0.5
     w_head: float = 1.0
     w_rel: float = 0.2
-    w_temp: float = 0.1
 
     use_stat_repr: bool = True
     use_pseudo_sup: bool = False
@@ -45,12 +49,8 @@ class DistillationTrainer:
         self.config = config
         self.device = device
 
-        if config.freeze_teacher:
-            self.teacher.eval()
-            for p in self.teacher.parameters():
-                p.requires_grad = False
-        else:
-            self.teacher.train()
+        self._load_teacher_weights_or_fail()
+        self._setup_teacher_trainability()
 
         self.loss_fn = SRRLPoseDistillLoss(
             DistillLossWeights(
@@ -58,51 +58,110 @@ class DistillationTrainer:
                 w_repr=config.w_repr,
                 w_head=config.w_head,
                 w_rel=config.w_rel,
-                w_temp=config.w_temp,
             ),
             use_stat_repr=config.use_stat_repr,
         )
 
         params = list(self.student.parameters()) + list(self.projector.parameters())
+        if config.train_teacher:
+            params += list(self.teacher.parameters())
         self.optimizer = torch.optim.Adam(params, lr=config.lr)
 
         self.save_dir = Path(config.save_dir)
         self.save_dir.mkdir(parents=True, exist_ok=True)
+
+        print(
+            f"[Init] teacher_trainable={config.train_teacher}, "
+            f"use_pseudo_sup={config.use_pseudo_sup}, single_frame=True"
+        )
+
+    def _safe_load(self, module: torch.nn.Module, ckpt_path: str, strict: bool, module_name: str) -> None:
+        path = Path(ckpt_path)
+        if not path.exists():
+            raise FileNotFoundError(f"{module_name} checkpoint 不存在: {path}")
+        state = torch.load(path, map_location="cpu")
+        if isinstance(state, dict) and "state_dict" in state:
+            state = state["state_dict"]
+        missing, unexpected = module.load_state_dict(state, strict=strict)
+        print(
+            f"[TeacherLoad] {module_name} <- {path} | strict={strict} "
+            f"| missing={len(missing)} unexpected={len(unexpected)}"
+        )
+
+    def _load_teacher_weights_or_fail(self) -> None:
+        cfg = self.config
+        loaded_any = False
+
+        if cfg.teacher_backbone_ckpt:
+            self._safe_load(self.teacher.encoder, cfg.teacher_backbone_ckpt, cfg.strict_teacher_load, "teacher.backbone")
+            loaded_any = True
+        if cfg.teacher_head_ckpt:
+            self._safe_load(self.teacher.head, cfg.teacher_head_ckpt, cfg.strict_teacher_load, "teacher.head")
+            loaded_any = True
+
+        if not loaded_any:
+            if cfg.allow_random_teacher:
+                print("[TeacherLoad] 未提供teacher权重，已显式允许随机teacher（不推荐）。")
+            else:
+                raise RuntimeError(
+                    "未提供 teacher 权重。请至少设置 --teacher_backbone_ckpt 和/或 --teacher_head_ckpt，"
+                    "或显式设置 --allow_random_teacher。"
+                )
+
+    def _setup_teacher_trainability(self) -> None:
+        if self.config.train_teacher:
+            self.teacher.train()
+            for p in self.teacher.parameters():
+                p.requires_grad = True
+            print("[Teacher] mode=train, parameters are trainable")
+        else:
+            self.teacher.eval()
+            for p in self.teacher.parameters():
+                p.requires_grad = False
+            print("[Teacher] mode=eval, parameters are frozen")
 
     def _move_batch(self, batch: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
         return {
             "visual": batch["visual"].to(self.device, non_blocking=True),
             "radar": batch["radar"].to(self.device, non_blocking=True),
             "heatmap_gt": batch["heatmap_gt"].to(self.device, non_blocking=True),
+            "kp_valid": batch["kp_valid"].to(self.device, non_blocking=True),
         }
 
     def train_one_epoch(self, dataloader: DataLoader, epoch: int) -> Dict[str, float]:
         self.student.train()
         self.projector.train()
-        running = {"total": 0.0, "sup": 0.0, "repr": 0.0, "head": 0.0, "rel": 0.0, "temp": 0.0}
+        if self.config.train_teacher:
+            self.teacher.train()
+
+        running = {"total": 0.0, "sup": 0.0, "repr": 0.0, "head": 0.0, "rel": 0.0}
 
         for batch in dataloader:
             batch = self._move_batch(batch)
 
-            with torch.no_grad() if self.config.freeze_teacher else torch.enable_grad():
+            teacher_ctx = torch.enable_grad() if self.config.train_teacher else torch.no_grad()
+            with teacher_ctx:
                 out_v = self.teacher(batch["visual"])
+
             out_r = self.student(batch["radar"])
 
+            if out_r["heatmap"].shape[-2:] != batch["heatmap_gt"].shape[-2:]:
+                raise ValueError(
+                    f"student heatmap与GT尺寸不一致: pred={out_r['heatmap'].shape}, gt={batch['heatmap_gt'].shape}"
+                )
+
             f_r_proj = self.projector(out_r["feat"])
-            # SRRL head loss: use frozen visual head D_v to decode projected radar feature
             h_rt = self.teacher.decode_with_head(f_r_proj)
 
-            # optional temporal smooth: if your batch is sequence, reshape then pass;
-            # for image batch currently disabled by None.
             losses = self.loss_fn(
                 h_r=out_r["heatmap"],
                 h_v=out_v["heatmap"],
                 h_rt=h_rt,
                 f_r_proj=f_r_proj,
                 f_v=out_v["feat"],
-                h_gt=None if self.config.use_pseudo_sup else batch["heatmap_gt"],
-                h_pseudo=out_v["heatmap"] if self.config.use_pseudo_sup else None,
-                pred_coords_seq=None,
+                h_gt=batch["heatmap_gt"],
+                kp_valid=batch["kp_valid"],
+                use_pseudo_sup=self.config.use_pseudo_sup,
             )
 
             self.optimizer.zero_grad(set_to_none=True)
@@ -114,7 +173,11 @@ class DistillationTrainer:
 
         num_batches = max(1, len(dataloader))
         avg = {k: v / num_batches for k, v in running.items()}
-        print(f"[Epoch {epoch}] " + ", ".join([f"{k}: {v:.4f}" for k, v in avg.items()]))
+        print(
+            f"[Epoch {epoch}] "
+            + ", ".join([f"{k}: {v:.4f}" for k, v in avg.items()])
+            + f", teacher_trainable={self.config.train_teacher}"
+        )
         return avg
 
     @torch.no_grad()
@@ -128,20 +191,14 @@ class DistillationTrainer:
         for epoch in range(1, self.config.num_epochs + 1):
             metrics = self.train_one_epoch(train_loader, epoch)
 
-            torch.save(
-                {
-                    "student": self.student.state_dict(),
-                    "projector": self.projector.state_dict(),
-                },
-                self.save_dir / f"student_epoch_{epoch}.pt",
-            )
+            ckpt = {
+                "student": self.student.state_dict(),
+                "projector": self.projector.state_dict(),
+                "teacher": self.teacher.state_dict(),
+                "config": self.config.__dict__,
+            }
+            torch.save(ckpt, self.save_dir / f"student_epoch_{epoch}.pt")
 
             if metrics["total"] < best_loss:
                 best_loss = metrics["total"]
-                torch.save(
-                    {
-                        "student": self.student.state_dict(),
-                        "projector": self.projector.state_dict(),
-                    },
-                    self.save_dir / "student_best.pt",
-                )
+                torch.save(ckpt, self.save_dir / "student_best.pt")

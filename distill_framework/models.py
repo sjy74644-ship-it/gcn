@@ -4,16 +4,16 @@ from typing import Dict
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from ultralytics import YOLO
 
 
 class YOLOv8Backbone(nn.Module):
-    """Use YOLOv8 backbone graph execution to extract deep feature map."""
+    """Extract deep feature map from YOLOv8 graph."""
 
     def __init__(self, model_name: str = "yolov8n.yaml") -> None:
         super().__init__()
         yolo = YOLO(model_name)
-        # underlying DetectionModel
         self.model = yolo.model
         self.layers = self.model.model
         self.save = self.model.save
@@ -29,9 +29,10 @@ class YOLOv8Backbone(nn.Module):
             x = m(x)
             cache.append(x if m.i in self.save else None)
 
-        # DetectionModel最后输出一般是list/tuple，取最高层特征
         if isinstance(x, (list, tuple)):
             x = x[-1]
+        if not isinstance(x, torch.Tensor):
+            raise RuntimeError("YOLOv8 backbone output is not a tensor.")
         return x
 
 
@@ -70,20 +71,38 @@ class SRRLProjector(nn.Module):
 
 
 class PoseHeatmapNet(nn.Module):
-    """YOLOv8-backbone pose heatmap net."""
+    """Single-frame pose heatmap net with explicit output heatmap size alignment."""
 
-    def __init__(self, num_joints: int, yolo_model: str = "yolov8n.yaml", in_channels: int = 256) -> None:
+    def __init__(
+        self,
+        num_joints: int,
+        yolo_model: str = "yolov8n.yaml",
+        in_channels: int = 256,
+        out_heatmap_size: int = 64,
+    ) -> None:
         super().__init__()
         self.encoder = YOLOv8Backbone(model_name=yolo_model)
         self.head = HeatmapHead(in_channels=in_channels, num_joints=num_joints)
+        self.out_heatmap_size = int(out_heatmap_size)
+
+    def _align_heatmap(self, heatmap: torch.Tensor) -> torch.Tensor:
+        h, w = heatmap.shape[-2:]
+        if h == self.out_heatmap_size and w == self.out_heatmap_size:
+            return heatmap
+        return F.interpolate(
+            heatmap,
+            size=(self.out_heatmap_size, self.out_heatmap_size),
+            mode="bilinear",
+            align_corners=False,
+        )
 
     def forward(self, x: torch.Tensor) -> Dict[str, torch.Tensor]:
         feat = self.encoder(x)
-        heatmap = self.head(feat)
+        heatmap = self._align_heatmap(self.head(feat))
         return {"feat": feat, "heatmap": heatmap}
 
     def decode_with_head(self, feat: torch.Tensor) -> torch.Tensor:
-        return self.head(feat)
+        return self._align_heatmap(self.head(feat))
 
 
 class PoseTeacher(PoseHeatmapNet):

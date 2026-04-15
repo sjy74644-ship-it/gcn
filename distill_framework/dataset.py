@@ -13,29 +13,26 @@ from torchvision import transforms as T
 
 @dataclass(frozen=True)
 class DatasetSpec:
-    # 数据根目录（仅用于默认值）
     data_root: Path
     input_img_dir: Path
     input_lbl_dir: Path
-
-    # 可选视觉目录（若不提供则 visual=radar）
     visual_img_dir: Optional[Path] = None
 
-    # 数据划分
     split: str = "train"  # train/val/all
     val_ratio: float = 0.2
     random_seed: int = 42
     auto_create_empty_label: bool = False
 
-    # 关键点设置
     num_joints: int = 13
-    kpt_dim: int = 3
+    kpt_dim: int = 3  # expected (x,y,v)
 
-    # 输入/热图设置
     image_exts: Tuple[str, ...] = (".jpg", ".jpeg", ".png", ".bmp")
     input_size: int = 640
     heatmap_size: int = 64
     sigma: float = 2.5
+
+    require_visual: bool = True
+    allow_same_modal_distill: bool = False
 
 
 def check_dir_exists(path: Path) -> None:
@@ -105,11 +102,12 @@ def collect_pairs(spec: DatasetSpec) -> List[Tuple[Path, Path]]:
     if bad:
         samples = "\n".join(bad[:10])
         raise RuntimeError(f"存在格式错误标签，示例:\n{samples}")
-
     return pairs
 
 
-def split_pairs(pairs: List[Tuple[Path, Path]], val_ratio: float, random_seed: int) -> Tuple[List[Tuple[Path, Path]], List[Tuple[Path, Path]]]:
+def split_pairs(
+    pairs: List[Tuple[Path, Path]], val_ratio: float, random_seed: int
+) -> Tuple[List[Tuple[Path, Path]], List[Tuple[Path, Path]]]:
     random.seed(random_seed)
     pairs = pairs[:]
     random.shuffle(pairs)
@@ -123,7 +121,7 @@ def split_pairs(pairs: List[Tuple[Path, Path]], val_ratio: float, random_seed: i
 
 
 class PairedPosePngDataset(Dataset):
-    """采用 YOLOv8 目录+标签配对流程读取数据。"""
+    """Single-frame dataset with YOLO labels and valid-point masking."""
 
     def __init__(
         self,
@@ -133,6 +131,12 @@ class PairedPosePngDataset(Dataset):
     ) -> None:
         self.spec = spec
 
+        if spec.require_visual and spec.visual_img_dir is None and not spec.allow_same_modal_distill:
+            raise ValueError(
+                "跨模态蒸馏要求提供 --visual_img_dir。"
+                "如确需同模态蒸馏，请显式设置 allow_same_modal_distill=True。"
+            )
+
         all_pairs = collect_pairs(spec)
         train_pairs, val_pairs = split_pairs(all_pairs, spec.val_ratio, spec.random_seed)
         if spec.split == "train":
@@ -141,6 +145,9 @@ class PairedPosePngDataset(Dataset):
             self.pairs = val_pairs
         else:
             self.pairs = all_pairs
+
+        if len(self.pairs) == 0:
+            raise RuntimeError(f"split={spec.split} 没有可用样本，请检查数据和划分配置")
 
         default_tf = T.Compose([T.Resize((spec.input_size, spec.input_size)), T.ToTensor()])
         self.transform_visual = transform_visual or default_tf
@@ -153,24 +160,39 @@ class PairedPosePngDataset(Dataset):
     def _load_rgb(path: Path) -> Image.Image:
         return Image.open(path).convert("RGB")
 
-    def _parse_yolo_pose_keypoints(self, label_path: Path) -> torch.Tensor:
-        """解析第一行person关键点，输出 [K,2] (input_size尺度)."""
+    def _parse_yolo_pose_keypoints(self, label_path: Path) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Parse first label line, return keypoints [K,2], valid mask [K], person_valid scalar."""
         lines = [x.strip() for x in label_path.read_text(encoding="utf-8").splitlines() if x.strip()]
         if len(lines) == 0:
-            return torch.zeros((self.spec.num_joints, 2), dtype=torch.float32)
+            # no-person sample
+            return (
+                torch.zeros((self.spec.num_joints, 2), dtype=torch.float32),
+                torch.zeros((self.spec.num_joints,), dtype=torch.float32),
+                torch.tensor(0.0, dtype=torch.float32),
+            )
 
         parts = lines[0].split()
         nums = [float(x) for x in parts]
-        # [cls, cx, cy, w, h, kx1, ky1, v1, ...]
         kpt_vals = nums[5:]
-        keypoints = []
-        for k in range(self.spec.num_joints):
-            x = kpt_vals[k * self.spec.kpt_dim + 0]
-            y = kpt_vals[k * self.spec.kpt_dim + 1]
-            keypoints.append([x * self.spec.input_size, y * self.spec.input_size])
-        return torch.tensor(keypoints, dtype=torch.float32)
 
-    def _gaussian_heatmaps(self, keypoints_xy: torch.Tensor) -> torch.Tensor:
+        keypoints = []
+        valid = []
+        for k in range(self.spec.num_joints):
+            base = k * self.spec.kpt_dim
+            x = kpt_vals[base + 0]
+            y = kpt_vals[base + 1]
+            v = kpt_vals[base + 2] if self.spec.kpt_dim >= 3 else 1.0
+
+            # YOLO pose labels are normalized, valid if v > 0
+            keypoints.append([x * self.spec.input_size, y * self.spec.input_size])
+            valid.append(1.0 if v > 0 else 0.0)
+
+        valid_t = torch.tensor(valid, dtype=torch.float32)
+        person_valid = torch.tensor(1.0 if valid_t.sum() > 0 else 0.0, dtype=torch.float32)
+        return torch.tensor(keypoints, dtype=torch.float32), valid_t, person_valid
+
+    def _gaussian_heatmaps(self, keypoints_xy: torch.Tensor, kp_valid: torch.Tensor) -> torch.Tensor:
+        """Generate heatmap only for valid keypoints. Invalid points remain all-zero maps."""
         k = self.spec.num_joints
         h = self.spec.heatmap_size
         w = self.spec.heatmap_size
@@ -179,13 +201,14 @@ class PairedPosePngDataset(Dataset):
         ys = torch.arange(h, dtype=torch.float32).view(1, h, 1)
         xs = torch.arange(w, dtype=torch.float32).view(1, 1, w)
 
-        kp = keypoints_xy.clone()
-        kp[:, 0] = kp[:, 0] * (w / float(self.spec.input_size))
-        kp[:, 1] = kp[:, 1] * (h / float(self.spec.input_size))
-
-        mu_x = kp[:, 0].view(k, 1, 1)
-        mu_y = kp[:, 1].view(k, 1, 1)
-        return torch.exp(-((xs - mu_x) ** 2 + (ys - mu_y) ** 2) / (2.0 * sigma2))
+        heatmaps = torch.zeros((k, h, w), dtype=torch.float32)
+        for i in range(k):
+            if kp_valid[i] <= 0:
+                continue
+            x = keypoints_xy[i, 0] * (w / float(self.spec.input_size))
+            y = keypoints_xy[i, 1] * (h / float(self.spec.input_size))
+            heatmaps[i] = torch.exp(-((xs - x) ** 2 + (ys - y) ** 2) / (2.0 * sigma2))
+        return heatmaps
 
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
         radar_img_path, label_path = self.pairs[idx]
@@ -195,8 +218,10 @@ class PairedPosePngDataset(Dataset):
             visual_img_path = self.spec.visual_img_dir / rel
             if not visual_img_path.exists():
                 raise FileNotFoundError(f"视觉图像不存在: {visual_img_path}")
-        else:
+        elif self.spec.allow_same_modal_distill:
             visual_img_path = radar_img_path
+        else:
+            raise RuntimeError("visual_img_dir 未设置且未允许同模态蒸馏。")
 
         visual_img = self._load_rgb(visual_img_path)
         radar_img = self._load_rgb(radar_img_path)
@@ -204,8 +229,8 @@ class PairedPosePngDataset(Dataset):
         visual_tensor = self.transform_visual(visual_img)
         radar_tensor = self.transform_radar(radar_img)
 
-        keypoints_xy = self._parse_yolo_pose_keypoints(label_path)
-        gt_heatmap = self._gaussian_heatmaps(keypoints_xy)
+        keypoints_xy, kp_valid, person_valid = self._parse_yolo_pose_keypoints(label_path)
+        gt_heatmap = self._gaussian_heatmaps(keypoints_xy, kp_valid)
 
         sample_id = str(rel.with_suffix(""))
         return {
@@ -213,5 +238,28 @@ class PairedPosePngDataset(Dataset):
             "visual": visual_tensor,
             "radar": radar_tensor,
             "keypoints": keypoints_xy,
+            "kp_valid": kp_valid,
+            "person_valid": person_valid,
             "heatmap_gt": gt_heatmap,
         }
+
+
+class ImageOnlyDataset(Dataset):
+    """Inference-only dataset, no labels required."""
+
+    def __init__(self, input_img_dir: Path, input_size: int = 640, image_exts: Sequence[str] = (".jpg", ".jpeg", ".png", ".bmp")) -> None:
+        check_dir_exists(input_img_dir)
+        self.input_img_dir = input_img_dir
+        self.images = list_image_files(input_img_dir, image_exts)
+        if len(self.images) == 0:
+            raise RuntimeError(f"目录无可用图片: {input_img_dir}")
+        self.tf = T.Compose([T.Resize((input_size, input_size)), T.ToTensor()])
+
+    def __len__(self) -> int:
+        return len(self.images)
+
+    def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
+        p = self.images[idx]
+        rel = p.relative_to(self.input_img_dir)
+        img = Image.open(p).convert("RGB")
+        return {"id": str(rel.with_suffix("")), "radar": self.tf(img)}
