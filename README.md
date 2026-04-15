@@ -1,82 +1,63 @@
-# Visual-to-Radar SRRL Pose Distillation Framework (YOLOv8 Backbone)
+# Visual-to-Radar SRRL Distillation (YOLOv8 + YOLO标签读取流程)
 
-按你的要求，骨干网络已切换为 **YOLOv8**，并且输入格式与 YOLOv8 保持一致：
+已按你的要求，把数据读取流程替换为你给出的 YOLO 流程：
 
-- 输入图像：RGB PNG
-- 预处理：Resize 到 `input_size`（默认 640），`ToTensor()` 转到 `[0,1]`
-- Teacher 输入：视觉图像
-- Student 输入：雷达图像
-- 输出：雷达预测 2D 坐标（由 heatmap 经 soft-argmax 解码）
+- 从 `images/` 递归扫描图片
+- 按相对路径到 `labels/` 找对应 `.txt`
+- 校验标签列数：`1 + 4 + NKPT*KPT_DIM`
+- 自动随机划分 train/val（`val_ratio` + `random_seed`）
+- 输入预处理采用 YOLOv8 风格：`Resize(input_size)` + `ToTensor()`
 
-## 损失
+> 默认关键点设置：`NKPT=13`, `KPT_DIM=3`
 
-\[
-L = w_{sup}L_{sup} + w_{repr}L_{repr} + w_{head}L_{head} + w_{rel}L_{rel} + w_{temp}L_{temp}
-\]
-
-默认：`w_sup=1.0, w_repr=0.5, w_head=1.0, w_rel=0.2, w_temp=0.1`
-
-## 数据格式
+## 目录示例
 
 ```text
-project_root/
-  data/
-    visual/
-      000001.png
-    radar/
-      000001.png
-    labels.csv
+data_root/
+  images/
+    action1/0001.png
+  labels/
+    action1/0001.txt
 ```
-
-`labels.csv`：
-
-```csv
-id,x1,y1,x2,y2,...,x17,y17
-000001,120,90,130,100,...
-```
-
-坐标默认按 `input_size` 尺度解释（默认 640）。
 
 ## 训练
 
 ```bash
 python train.py \
-  --data_root ./data \
-  --labels_csv ./data/labels.csv \
-  --num_joints 17 \
-  --input_size 640 \
+  --input_img_dir /path/to/data_root/images \
+  --input_lbl_dir /path/to/data_root/labels \
+  --visual_img_dir /path/to/visual_images_optional \
+  --num_joints 13 \
+  --kpt_dim 3 \
+  --val_ratio 0.2 \
+  --random_seed 42 \
+  --input_size 320 \
   --yolo_model yolov8n.yaml \
   --feat_channels 256
 ```
 
-## 指定输入/输出路径推理（你要的方式）
+说明：
+- 如果不传 `--visual_img_dir`，则默认 `visual=radar`。
+- 可通过 `--auto_create_empty_label` 自动创建缺失空标签。
+- 已加入环境参数开关：`TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD`、`KMP_DUPLICATE_LIB_OK`、`OMP_NUM_THREADS`。
 
-输入：视觉图像目录、雷达图像目录、2D 真值 CSV。  
-输出：雷达预测 2D 坐标 CSV。
+## 推理（输出雷达2D坐标）
 
 ```bash
 python predict.py \
-  --visual_dir /path/to/visual \
-  --radar_dir /path/to/radar \
-  --gt_csv /path/to/labels.csv \
+  --input_img_dir /path/to/data_root/images \
+  --input_lbl_dir /path/to/data_root/labels \
   --checkpoint /path/to/student_best.pt \
   --output_csv /path/to/pred_radar_coords.csv \
-  --input_size 640 \
+  --num_joints 13 \
+  --kpt_dim 3 \
+  --input_size 320 \
   --yolo_model yolov8n.yaml \
   --feat_channels 256
 ```
 
-输出 CSV：
+输出格式：
 
 ```text
-id,pred_x1,pred_y1,...,pred_xK,pred_yK
+id,pred_x1,pred_y1,...,pred_x13,pred_y13
 ```
-
-## 文件
-
-- `distill_framework/dataset.py`：YOLOv8 输入格式的数据读取与 GT heatmap 生成
-- `distill_framework/models.py`：YOLOv8 backbone + heatmap head + projector
-- `distill_framework/losses.py`：SRRL 多项损失
-- `distill_framework/trainer.py`：训练流程
-- `train.py`：训练入口
-- `predict.py`：路径驱动的雷达2D坐标导出

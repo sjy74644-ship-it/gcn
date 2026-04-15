@@ -12,20 +12,21 @@ from distill_framework.models import PoseStudent, soft_argmax_2d
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Predict radar 2D keypoints from paired path inputs")
-    parser.add_argument("--visual_dir", type=str, required=True, help="视觉图像路径目录")
-    parser.add_argument("--radar_dir", type=str, required=True, help="雷达图像路径目录")
-    parser.add_argument("--gt_csv", type=str, required=True, help="2D坐标真值CSV路径")
-    parser.add_argument("--checkpoint", type=str, required=True, help="student checkpoint路径")
-    parser.add_argument("--output_csv", type=str, required=True, help="雷达预测2D坐标输出CSV")
+    parser = argparse.ArgumentParser(description="Predict radar 2D keypoints with YOLO-style data flow")
+    parser.add_argument("--input_img_dir", type=str, required=True)
+    parser.add_argument("--input_lbl_dir", type=str, required=True)
+    parser.add_argument("--visual_img_dir", type=str, default=None)
+    parser.add_argument("--checkpoint", type=str, required=True)
+    parser.add_argument("--output_csv", type=str, required=True)
 
-    parser.add_argument("--num_joints", type=int, default=17)
+    parser.add_argument("--num_joints", type=int, default=13)
+    parser.add_argument("--kpt_dim", type=int, default=3)
     parser.add_argument("--heatmap_size", type=int, default=64)
-    parser.add_argument("--input_size", type=int, default=640)
+    parser.add_argument("--input_size", type=int, default=320)
     parser.add_argument("--yolo_model", type=str, default="yolov8n.yaml")
     parser.add_argument("--feat_channels", type=int, default=256)
     parser.add_argument("--batch_size", type=int, default=16)
-    parser.add_argument("--num_workers", type=int, default=4)
+    parser.add_argument("--num_workers", type=int, default=0)
     return parser.parse_args()
 
 
@@ -34,11 +35,13 @@ def main() -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     spec = DatasetSpec(
-        data_root=Path("."),
-        labels_csv=Path(args.gt_csv),
-        visual_dir=Path(args.visual_dir),
-        radar_dir=Path(args.radar_dir),
+        data_root=Path(args.input_img_dir).parent,
+        input_img_dir=Path(args.input_img_dir),
+        input_lbl_dir=Path(args.input_lbl_dir),
+        visual_img_dir=Path(args.visual_img_dir) if args.visual_img_dir else None,
+        split="all",
         num_joints=args.num_joints,
+        kpt_dim=args.kpt_dim,
         heatmap_size=args.heatmap_size,
         input_size=args.input_size,
     )
@@ -59,7 +62,6 @@ def main() -> None:
 
     student.eval()
     rows = []
-
     with torch.no_grad():
         for batch in dl:
             radar = batch["radar"].to(device)
