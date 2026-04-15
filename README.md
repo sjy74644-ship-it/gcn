@@ -76,10 +76,31 @@ python train.py \
 - `--simple_repr`：切换到简单版 `||G(F_r)-sg(F_v)||^2`（默认是统计版）。
 - `--train_teacher`：不冻结 teacher（默认冻结）。
 
+
+## 指定输入/输出路径进行推理（你要求的形式）
+
+已提供 `predict.py`，满足：
+
+- 输入路径：`visual_dir`（视觉图像目录）、`radar_dir`（雷达图像目录）、`gt_csv`（2D坐标真值）
+- 输出路径：`output_csv`（雷达预测的2D坐标）
+
+```bash
+python predict.py \
+  --visual_dir /path/to/visual \
+  --radar_dir /path/to/radar \
+  --gt_csv /path/to/labels.csv \
+  --checkpoint /path/to/student_best.pt \
+  --output_csv /path/to/pred_radar_coords.csv
+```
+
+输出 CSV 格式：
+- `id,pred_x1,pred_y1,...,pred_xK,pred_yK`
+
 ## 代码结构
 
 - `distill_framework/dataset.py`：成对 PNG + 关键点到 GT heatmap 生成
 - `distill_framework/models.py`：Teacher/Student、SRRL projector、soft-argmax
 - `distill_framework/losses.py`：`L_sup/L_repr/L_head/L_rel/L_temp`
 - `distill_framework/trainer.py`：蒸馏训练流程
-- `train.py`：命令行入口
+- `train.py`：训练命令行入口
+- `predict.py`：给定输入/输出路径，导出雷达预测2D坐标

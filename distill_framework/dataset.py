@@ -17,6 +17,8 @@ class DatasetSpec:
     labels_csv: Path
     visual_subdir: str = "visual"
     radar_subdir: str = "radar"
+    visual_dir: Optional[Path] = None
+    radar_dir: Optional[Path] = None
     image_ext: str = ".png"
     num_joints: int = 17
     sigma: float = 2.5
@@ -55,8 +57,8 @@ class PairedPosePngDataset(Dataset):
         self.transform_visual = transform_visual or default_tf
         self.transform_radar = transform_radar or default_tf
 
-        self.visual_dir = spec.data_root / spec.visual_subdir
-        self.radar_dir = spec.data_root / spec.radar_subdir
+        self.visual_dir = spec.visual_dir or (spec.data_root / spec.visual_subdir)
+        self.radar_dir = spec.radar_dir or (spec.data_root / spec.radar_subdir)
 
     def __len__(self) -> int:
         return len(self.df)
