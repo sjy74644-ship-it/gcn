@@ -34,12 +34,22 @@ class DatasetSpec:
 
     require_visual: bool = True
     allow_same_modal_distill: bool = False
+    align_to_stride: bool = True
+    model_stride: int = 32
 
 
 def check_dir_exists(path: Path) -> None:
     if not path.exists():
         raise FileNotFoundError(f"目录不存在: {path}")
 
+
+
+
+def _align_hw(hw: Tuple[int, int], stride: int) -> Tuple[int, int]:
+    h, w = hw
+    ah = ((h + stride - 1) // stride) * stride
+    aw = ((w + stride - 1) // stride) * stride
+    return ah, aw
 
 def list_image_files(folder: Path, exts: Sequence[str]) -> List[Path]:
     exts_set = {e.lower() for e in exts}
@@ -155,8 +165,22 @@ class PairedPosePngDataset(Dataset):
 
         vh, vw = spec.visual_input_hw
         rh, rw = spec.radar_input_hw
-        default_visual_tf = T.Compose([T.Resize((vh, vw)), T.ToTensor()])
-        default_radar_tf = T.Compose([T.Resize((rh, rw)), T.ToTensor()])
+        if spec.align_to_stride:
+            self.visual_model_hw = _align_hw((vh, vw), spec.model_stride)
+            self.radar_model_hw = _align_hw((rh, rw), spec.model_stride)
+        else:
+            self.visual_model_hw = (vh, vw)
+            self.radar_model_hw = (rh, rw)
+
+        if self.visual_model_hw != (vh, vw):
+            print(f"[Dataset] visual_input_hw {(vh, vw)} -> aligned {self.visual_model_hw} (stride={spec.model_stride})")
+        if self.radar_model_hw != (rh, rw):
+            print(f"[Dataset] radar_input_hw {(rh, rw)} -> aligned {self.radar_model_hw} (stride={spec.model_stride})")
+
+        vhm, vwm = self.visual_model_hw
+        rhm, rwm = self.radar_model_hw
+        default_visual_tf = T.Compose([T.Resize((vhm, vwm)), T.ToTensor()])
+        default_radar_tf = T.Compose([T.Resize((rhm, rwm)), T.ToTensor()])
         self.transform_visual = transform_visual or default_visual_tf
         self.transform_radar = transform_radar or default_radar_tf
 
@@ -181,7 +205,7 @@ class PairedPosePngDataset(Dataset):
         nums = [float(x) for x in parts]
         kpt_vals = nums[5:]
 
-        radar_h, radar_w = self.spec.radar_input_hw
+        radar_h, radar_w = self.radar_model_hw
         keypoints = []
         valid = []
         for k in range(self.spec.num_joints):
@@ -207,7 +231,7 @@ class PairedPosePngDataset(Dataset):
         ys = torch.arange(h, dtype=torch.float32).view(1, h, 1)
         xs = torch.arange(w, dtype=torch.float32).view(1, 1, w)
 
-        radar_h, radar_w = self.spec.radar_input_hw
+        radar_h, radar_w = self.radar_model_hw
 
         heatmaps = torch.zeros((k, h, w), dtype=torch.float32)
         for i in range(k):
@@ -266,7 +290,8 @@ class ImageOnlyDataset(Dataset):
         self.images = list_image_files(input_img_dir, image_exts)
         if len(self.images) == 0:
             raise RuntimeError(f"目录无可用图片: {input_img_dir}")
-        rh, rw = radar_input_hw
+        self.radar_model_hw = _align_hw(radar_input_hw, 32)
+        rh, rw = self.radar_model_hw
         self.tf = T.Compose([T.Resize((rh, rw)), T.ToTensor()])
 
     def __len__(self) -> int:

@@ -7,7 +7,7 @@ import pandas as pd
 import torch
 from torch.utils.data import DataLoader
 
-from distill_framework.dataset import DatasetSpec, ImageOnlyDataset, PairedPosePngDataset
+from distill_framework.dataset import DatasetSpec, ImageOnlyDataset, PairedPosePngDataset, _align_hw
 from distill_framework.models import PoseStudent, soft_argmax_2d
 
 
@@ -32,11 +32,13 @@ def parse_args() -> argparse.Namespace:
 
 def _build_loader(args: argparse.Namespace) -> DataLoader:
     img_dir = Path(args.input_img_dir)
+    radar_model_hw = _align_hw((args.radar_input_h, args.radar_input_w), 32)
+    args._radar_model_hw = radar_model_hw
     if not img_dir.exists():
         raise FileNotFoundError(f"input_img_dir 不存在: {img_dir}")
 
     if args.input_lbl_dir is None:
-        ds = ImageOnlyDataset(input_img_dir=img_dir, radar_input_hw=(args.radar_input_h, args.radar_input_w))
+        ds = ImageOnlyDataset(input_img_dir=img_dir, radar_input_hw=radar_model_hw)
         return DataLoader(ds, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers)
 
     lbl_dir = Path(args.input_lbl_dir)
@@ -52,8 +54,8 @@ def _build_loader(args: argparse.Namespace) -> DataLoader:
         num_joints=args.num_joints,
         kpt_dim=args.kpt_dim,
         heatmap_size=args.heatmap_size,
-        visual_input_hw=(args.radar_input_h, args.radar_input_w),
-        radar_input_hw=(args.radar_input_h, args.radar_input_w),
+        visual_input_hw=radar_model_hw,
+        radar_input_hw=radar_model_hw,
         require_visual=False,
         allow_same_modal_distill=True,
     )
@@ -94,8 +96,9 @@ def main() -> None:
             radar = batch["radar"].to(device)
             out = student(radar)
             coords = soft_argmax_2d(out["heatmap"])
-            coords[..., 0] = coords[..., 0] * (float(args.radar_input_w) / float(args.heatmap_size))
-            coords[..., 1] = coords[..., 1] * (float(args.radar_input_h) / float(args.heatmap_size))
+            rmh, rmw = args._radar_model_hw
+            coords[..., 0] = coords[..., 0] * (float(rmw) / float(args.heatmap_size))
+            coords[..., 1] = coords[..., 1] * (float(rmh) / float(args.heatmap_size))
 
             ids = batch["id"]
             for i, sid in enumerate(ids):
