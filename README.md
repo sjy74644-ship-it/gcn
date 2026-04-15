@@ -28,7 +28,8 @@ python train_teacher.py \
   --init_yolo_ckpt /path/to/yolov8n-pose.pt \
   --num_joints 13 \
   --kpt_dim 3 \
-  --input_size 320 \
+  --visual_input_h 270 \
+  --visual_input_w 480 \
   --heatmap_size 64 \
   --yolo_model yolov8n.yaml \
   --feat_channels 256 \
@@ -55,7 +56,10 @@ python train.py \
   --teacher_head_ckpt ./teacher_ckpts/teacher_head.pt \
   --num_joints 13 \
   --kpt_dim 3 \
-  --input_size 320 \
+  --visual_input_h 270 \
+  --visual_input_w 480 \
+  --radar_input_h 640 \
+  --radar_input_w 640 \
   --heatmap_size 64 \
   --num_epochs 20 \
   --save_dir ./checkpoints
@@ -73,7 +77,9 @@ python train.py \
 python predict.py \
   --input_img_dir /path/to/radar/images \
   --checkpoint /path/to/checkpoints/student_best.pt \
-  --output_csv /path/to/preds.csv
+  --output_csv /path/to/preds.csv \
+  --radar_input_h 640 \
+  --radar_input_w 640
 ```
 
 ### 2) 可选带标签评估
@@ -83,7 +89,9 @@ python predict.py \
   --input_img_dir /path/to/radar/images \
   --input_lbl_dir /path/to/labels \
   --checkpoint /path/to/checkpoints/student_best.pt \
-  --output_csv /path/to/preds.csv
+  --output_csv /path/to/preds.csv \
+  --radar_input_h 640 \
+  --radar_input_w 640
 ```
 
 ---
@@ -104,3 +112,6 @@ class cx cy w h kx1 ky1 v1 ... kxK kyK vK
 - 单帧版（时序损失不在当前版本中）
 - heatmap 输出会显式对齐到 `heatmap_size`
 - 默认要求 `visual_img_dir`，避免静默退化为同模态蒸馏
+
+
+> 视觉输入尺寸与雷达输入尺寸可不同（例如视觉 270x480，雷达 640x640）。

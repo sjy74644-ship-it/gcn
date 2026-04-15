@@ -18,7 +18,8 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument("--num_joints", type=int, default=13)
     parser.add_argument("--kpt_dim", type=int, default=3)
-    parser.add_argument("--input_size", type=int, default=320)
+    parser.add_argument("--visual_input_h", type=int, default=270)
+    parser.add_argument("--visual_input_w", type=int, default=480)
     parser.add_argument("--heatmap_size", type=int, default=64)
     parser.add_argument("--sigma", type=float, default=2.5)
 
@@ -61,7 +62,8 @@ def build_datasets(args: argparse.Namespace) -> tuple[PairedPosePngDataset, Pair
         random_seed=args.random_seed,
         num_joints=args.num_joints,
         kpt_dim=args.kpt_dim,
-        input_size=args.input_size,
+        visual_input_hw=(args.visual_input_h, args.visual_input_w),
+        radar_input_hw=(args.visual_input_h, args.visual_input_w),
         heatmap_size=args.heatmap_size,
         sigma=args.sigma,
         require_visual=False,

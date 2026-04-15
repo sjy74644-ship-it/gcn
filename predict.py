@@ -21,7 +21,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num_joints", type=int, default=13)
     parser.add_argument("--kpt_dim", type=int, default=3)
     parser.add_argument("--heatmap_size", type=int, default=64)
-    parser.add_argument("--input_size", type=int, default=320)
+    parser.add_argument("--radar_input_h", type=int, default=640)
+    parser.add_argument("--radar_input_w", type=int, default=640)
     parser.add_argument("--yolo_model", type=str, default="yolov8n.yaml")
     parser.add_argument("--feat_channels", type=int, default=256)
     parser.add_argument("--batch_size", type=int, default=16)
@@ -35,7 +36,7 @@ def _build_loader(args: argparse.Namespace) -> DataLoader:
         raise FileNotFoundError(f"input_img_dir 不存在: {img_dir}")
 
     if args.input_lbl_dir is None:
-        ds = ImageOnlyDataset(input_img_dir=img_dir, input_size=args.input_size)
+        ds = ImageOnlyDataset(input_img_dir=img_dir, radar_input_hw=(args.radar_input_h, args.radar_input_w))
         return DataLoader(ds, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers)
 
     lbl_dir = Path(args.input_lbl_dir)
@@ -51,7 +52,8 @@ def _build_loader(args: argparse.Namespace) -> DataLoader:
         num_joints=args.num_joints,
         kpt_dim=args.kpt_dim,
         heatmap_size=args.heatmap_size,
-        input_size=args.input_size,
+        visual_input_hw=(args.radar_input_h, args.radar_input_w),
+        radar_input_hw=(args.radar_input_h, args.radar_input_w),
         require_visual=False,
         allow_same_modal_distill=True,
     )
@@ -92,7 +94,8 @@ def main() -> None:
             radar = batch["radar"].to(device)
             out = student(radar)
             coords = soft_argmax_2d(out["heatmap"])
-            coords = coords * (float(args.input_size) / float(args.heatmap_size))
+            coords[..., 0] = coords[..., 0] * (float(args.radar_input_w) / float(args.heatmap_size))
+            coords[..., 1] = coords[..., 1] * (float(args.radar_input_h) / float(args.heatmap_size))
 
             ids = batch["id"]
             for i, sid in enumerate(ids):

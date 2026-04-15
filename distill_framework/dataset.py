@@ -27,7 +27,8 @@ class DatasetSpec:
     kpt_dim: int = 3  # expected (x,y,v)
 
     image_exts: Tuple[str, ...] = (".jpg", ".jpeg", ".png", ".bmp")
-    input_size: int = 640
+    visual_input_hw: Tuple[int, int] = (320, 320)  # (H, W)
+    radar_input_hw: Tuple[int, int] = (320, 320)  # (H, W)
     heatmap_size: int = 64
     sigma: float = 2.5
 
@@ -121,7 +122,10 @@ def split_pairs(
 
 
 class PairedPosePngDataset(Dataset):
-    """Single-frame dataset with YOLO labels and valid-point masking."""
+    """Single-frame dataset with YOLO labels and valid-point masking.
+
+    Supports different input resolutions for visual and radar branches.
+    """
 
     def __init__(
         self,
@@ -149,9 +153,12 @@ class PairedPosePngDataset(Dataset):
         if len(self.pairs) == 0:
             raise RuntimeError(f"split={spec.split} 没有可用样本，请检查数据和划分配置")
 
-        default_tf = T.Compose([T.Resize((spec.input_size, spec.input_size)), T.ToTensor()])
-        self.transform_visual = transform_visual or default_tf
-        self.transform_radar = transform_radar or default_tf
+        vh, vw = spec.visual_input_hw
+        rh, rw = spec.radar_input_hw
+        default_visual_tf = T.Compose([T.Resize((vh, vw)), T.ToTensor()])
+        default_radar_tf = T.Compose([T.Resize((rh, rw)), T.ToTensor()])
+        self.transform_visual = transform_visual or default_visual_tf
+        self.transform_radar = transform_radar or default_radar_tf
 
     def __len__(self) -> int:
         return len(self.pairs)
@@ -161,10 +168,9 @@ class PairedPosePngDataset(Dataset):
         return Image.open(path).convert("RGB")
 
     def _parse_yolo_pose_keypoints(self, label_path: Path) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Parse first label line, return keypoints [K,2], valid mask [K], person_valid scalar."""
+        """Parse first label line, return keypoints [K,2] in radar pixel space, valid mask [K]."""
         lines = [x.strip() for x in label_path.read_text(encoding="utf-8").splitlines() if x.strip()]
         if len(lines) == 0:
-            # no-person sample
             return (
                 torch.zeros((self.spec.num_joints, 2), dtype=torch.float32),
                 torch.zeros((self.spec.num_joints,), dtype=torch.float32),
@@ -175,16 +181,17 @@ class PairedPosePngDataset(Dataset):
         nums = [float(x) for x in parts]
         kpt_vals = nums[5:]
 
+        radar_h, radar_w = self.spec.radar_input_hw
         keypoints = []
         valid = []
         for k in range(self.spec.num_joints):
             base = k * self.spec.kpt_dim
-            x = kpt_vals[base + 0]
-            y = kpt_vals[base + 1]
+            x_norm = kpt_vals[base + 0]
+            y_norm = kpt_vals[base + 1]
             v = kpt_vals[base + 2] if self.spec.kpt_dim >= 3 else 1.0
 
-            # YOLO pose labels are normalized, valid if v > 0
-            keypoints.append([x * self.spec.input_size, y * self.spec.input_size])
+            # labels are normalized -> convert to radar pixel coordinates
+            keypoints.append([x_norm * radar_w, y_norm * radar_h])
             valid.append(1.0 if v > 0 else 0.0)
 
         valid_t = torch.tensor(valid, dtype=torch.float32)
@@ -192,7 +199,6 @@ class PairedPosePngDataset(Dataset):
         return torch.tensor(keypoints, dtype=torch.float32), valid_t, person_valid
 
     def _gaussian_heatmaps(self, keypoints_xy: torch.Tensor, kp_valid: torch.Tensor) -> torch.Tensor:
-        """Generate heatmap only for valid keypoints. Invalid points remain all-zero maps."""
         k = self.spec.num_joints
         h = self.spec.heatmap_size
         w = self.spec.heatmap_size
@@ -201,12 +207,14 @@ class PairedPosePngDataset(Dataset):
         ys = torch.arange(h, dtype=torch.float32).view(1, h, 1)
         xs = torch.arange(w, dtype=torch.float32).view(1, 1, w)
 
+        radar_h, radar_w = self.spec.radar_input_hw
+
         heatmaps = torch.zeros((k, h, w), dtype=torch.float32)
         for i in range(k):
             if kp_valid[i] <= 0:
                 continue
-            x = keypoints_xy[i, 0] * (w / float(self.spec.input_size))
-            y = keypoints_xy[i, 1] * (h / float(self.spec.input_size))
+            x = keypoints_xy[i, 0] * (w / float(radar_w))
+            y = keypoints_xy[i, 1] * (h / float(radar_h))
             heatmaps[i] = torch.exp(-((xs - x) ** 2 + (ys - y) ** 2) / (2.0 * sigma2))
         return heatmaps
 
@@ -247,13 +255,19 @@ class PairedPosePngDataset(Dataset):
 class ImageOnlyDataset(Dataset):
     """Inference-only dataset, no labels required."""
 
-    def __init__(self, input_img_dir: Path, input_size: int = 640, image_exts: Sequence[str] = (".jpg", ".jpeg", ".png", ".bmp")) -> None:
+    def __init__(
+        self,
+        input_img_dir: Path,
+        radar_input_hw: Tuple[int, int] = (320, 320),
+        image_exts: Sequence[str] = (".jpg", ".jpeg", ".png", ".bmp"),
+    ) -> None:
         check_dir_exists(input_img_dir)
         self.input_img_dir = input_img_dir
         self.images = list_image_files(input_img_dir, image_exts)
         if len(self.images) == 0:
             raise RuntimeError(f"目录无可用图片: {input_img_dir}")
-        self.tf = T.Compose([T.Resize((input_size, input_size)), T.ToTensor()])
+        rh, rw = radar_input_hw
+        self.tf = T.Compose([T.Resize((rh, rw)), T.ToTensor()])
 
     def __len__(self) -> int:
         return len(self.images)

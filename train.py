@@ -28,7 +28,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--kpt_dim", type=int, default=3)
     parser.add_argument("--sigma", type=float, default=2.5)
     parser.add_argument("--heatmap_size", type=int, default=64)
-    parser.add_argument("--input_size", type=int, default=320)
+    parser.add_argument("--visual_input_h", type=int, default=270)
+    parser.add_argument("--visual_input_w", type=int, default=480)
+    parser.add_argument("--radar_input_h", type=int, default=640)
+    parser.add_argument("--radar_input_w", type=int, default=640)
 
     parser.add_argument("--yolo_model", type=str, default="yolov8n.yaml")
     parser.add_argument("--feat_channels", type=int, default=256)
@@ -95,7 +98,8 @@ def main() -> None:
         kpt_dim=args.kpt_dim,
         sigma=args.sigma,
         heatmap_size=args.heatmap_size,
-        input_size=args.input_size,
+        visual_input_hw=(args.visual_input_h, args.visual_input_w),
+        radar_input_hw=(args.radar_input_h, args.radar_input_w),
         require_visual=not args.allow_same_modal_distill,
         allow_same_modal_distill=args.allow_same_modal_distill,
     )
