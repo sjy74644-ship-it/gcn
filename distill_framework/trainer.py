@@ -180,25 +180,74 @@ class DistillationTrainer:
         )
         return avg
 
+
+    @torch.no_grad()
+    def validate_one_epoch(self, dataloader: DataLoader, epoch: int) -> Dict[str, float]:
+        self.student.eval()
+        self.projector.eval()
+        self.teacher.eval()
+
+        running = {"total": 0.0, "sup": 0.0, "repr": 0.0, "head": 0.0, "rel": 0.0}
+
+        for batch in dataloader:
+            batch = self._move_batch(batch)
+            out_v = self.teacher(batch["visual"])
+            out_r = self.student(batch["radar"])
+
+            if out_r["heatmap"].shape[-2:] != batch["heatmap_gt"].shape[-2:]:
+                raise ValueError(
+                    f"[VAL] student heatmap与GT尺寸不一致: pred={out_r['heatmap'].shape}, gt={batch['heatmap_gt'].shape}"
+                )
+
+            f_r_proj = self.projector(out_r["feat"])
+            h_rt = self.teacher.decode_with_head(f_r_proj)
+
+            losses = self.loss_fn(
+                h_r=out_r["heatmap"],
+                h_v=out_v["heatmap"],
+                h_rt=h_rt,
+                f_r_proj=f_r_proj,
+                f_v=out_v["feat"],
+                h_gt=batch["heatmap_gt"],
+                kp_valid=batch["kp_valid"],
+                use_pseudo_sup=self.config.use_pseudo_sup,
+            )
+
+            for k in running:
+                running[k] += losses[k].item()
+
+        num_batches = max(1, len(dataloader))
+        avg = {k: v / num_batches for k, v in running.items()}
+        print(f"[Val {epoch}] " + ", ".join([f"{k}: {v:.4f}" for k, v in avg.items()]))
+        return avg
+
     @torch.no_grad()
     def infer_keypoints(self, radar_batch: torch.Tensor) -> torch.Tensor:
         self.student.eval()
         out_r = self.student(radar_batch.to(self.device))
         return soft_argmax_2d(out_r["heatmap"])
 
-    def fit(self, train_loader: DataLoader) -> None:
+    def fit(self, train_loader: DataLoader, val_loader: Optional[DataLoader] = None) -> None:
         best_loss = float("inf")
         for epoch in range(1, self.config.num_epochs + 1):
-            metrics = self.train_one_epoch(train_loader, epoch)
+            train_metrics = self.train_one_epoch(train_loader, epoch)
+            if val_loader is not None:
+                eval_metrics = self.validate_one_epoch(val_loader, epoch)
+                monitor_loss = eval_metrics["total"]
+            else:
+                eval_metrics = None
+                monitor_loss = train_metrics["total"]
 
             ckpt = {
                 "student": self.student.state_dict(),
                 "projector": self.projector.state_dict(),
                 "teacher": self.teacher.state_dict(),
                 "config": self.config.__dict__,
+                "train_metrics": train_metrics,
+                "val_metrics": eval_metrics,
             }
             torch.save(ckpt, self.save_dir / f"student_epoch_{epoch}.pt")
 
-            if metrics["total"] < best_loss:
-                best_loss = metrics["total"]
+            if monitor_loss < best_loss:
+                best_loss = monitor_loss
                 torch.save(ckpt, self.save_dir / "student_best.pt")

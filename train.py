@@ -104,11 +104,21 @@ def main() -> None:
         allow_same_modal_distill=args.allow_same_modal_distill,
     )
     train_ds = PairedPosePngDataset(ds_spec)
+    val_ds = PairedPosePngDataset(DatasetSpec(**{**ds_spec.__dict__, "split": "val"}))
 
     train_loader = DataLoader(
         train_ds,
         batch_size=args.batch_size,
         shuffle=True,
+        num_workers=args.num_workers,
+        pin_memory=True,
+        drop_last=False,
+    )
+
+    val_loader = DataLoader(
+        val_ds,
+        batch_size=args.batch_size,
+        shuffle=False,
         num_workers=args.num_workers,
         pin_memory=True,
         drop_last=False,
@@ -154,7 +164,7 @@ def main() -> None:
         config=config,
         device=device,
     )
-    trainer.fit(train_loader)
+    trainer.fit(train_loader, val_loader=val_loader)
 
 
 if __name__ == "__main__":

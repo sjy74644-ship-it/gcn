@@ -67,6 +67,8 @@ python train.py \
 
 默认 teacher 冻结；若要联合训练 teacher：加 `--train_teacher`。
 
+`train.py` 会按 `val_ratio` 自动划分 train/val，并在每个 epoch 打印训练和验证损失。
+
 ---
 
 ## C. 推理
